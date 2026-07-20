@@ -1,0 +1,7 @@
+# Исключаем сгенерированные превью и выходные тяжелые отчеты
+output_real_files/
+output_report/previews/
+*.tif
+*.tiff
+__pycache__/
+.DS_Store
