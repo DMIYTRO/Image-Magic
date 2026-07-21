@@ -12,6 +12,7 @@ from config.profiles import DEFAULT_PROFILE, PrePressProfile
 from core.inspector import inspect_file
 from core.preview_generator import generate_preview
 from core.report_builder import build_reports
+from core.pdf_exporter import combine_images_to_pdf
 from validators import get_validator
 
 def main():
@@ -45,6 +46,7 @@ def main():
 
     profile = PrePressProfile(target_dpi=args.dpi)
     results = []
+    preview_file_paths = []
 
     for file_path in files:
         file_name = os.path.basename(file_path)
@@ -74,19 +76,36 @@ def main():
             )
 
             results.append((meta, val_result, rel_preview_path))
+            preview_file_paths.append(preview_filepath)
 
         except Exception as e:
             print(f"⚠️ Ошибка при обработке {file_name}: {e}")
 
-    # 4. Сборка отчётов
+    # 4. Сборка отчётов (HTML, Audit PDF, JSON)
     html_p, json_p, pdf_p = build_reports(results, output_dir)
+
+    # 5. Сборка многостраничного PDF входящих макетов и превью с рамками
+    combined_pdf_path = os.path.join(output_dir, "combined_layouts.pdf")
+    combined_preview_pdf_path = os.path.join(output_dir, "combined_previews.pdf")
+    
+    try:
+        if files:
+            combine_images_to_pdf(files, combined_pdf_path, dpi=profile.target_dpi)
+        if preview_file_paths:
+            combine_images_to_pdf(preview_file_paths, combined_preview_pdf_path, dpi=profile.target_dpi)
+    except Exception as e:
+        print(f"⚠️ Предупреждение при сборке многостраничного PDF макетов: {e}")
 
     print("\n" + "=" * 60)
     print(f"✅ Проверка завершена! Обработано макетов: {len(results)}")
-    print(f"📄 HTML-отчёт: {html_p}")
-    print(f"📊 JSON-отчёт: {json_p}")
+    print(f"📄 HTML-отчёт:    {html_p}")
+    print(f"📊 JSON-отчёт:    {json_p}")
     if pdf_p:
-        print(f"📕 PDF-отчёт:  {pdf_p}")
+        print(f"📕 PDF-отчёт:     {pdf_p}")
+    if os.path.exists(combined_pdf_path):
+        print(f"📚 Сборный PDF макетов: {combined_pdf_path}")
+    if os.path.exists(combined_preview_pdf_path):
+        print(f"🖼 Сборный PDF превью:  {combined_preview_pdf_path}")
     print("=" * 60)
 
 if __name__ == "__main__":
