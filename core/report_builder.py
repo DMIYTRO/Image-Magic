@@ -241,4 +241,12 @@ def build_reports(results: List[Tuple[ImageMetadata, ValidationResult, str]], ou
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(html_content)
 
-    return html_path, json_path
+    # 3. Генерация PDF
+    try:
+        from core.pdf_builder import build_pdf_report
+        pdf_path = build_pdf_report(results, output_dir)
+    except Exception as e:
+        print(f"⚠️ Ошибка при создании PDF отчёта: {e}")
+        pdf_path = ""
+
+    return html_path, json_path, pdf_path

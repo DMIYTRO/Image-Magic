@@ -79,12 +79,14 @@ def main():
             print(f"⚠️ Ошибка при обработке {file_name}: {e}")
 
     # 4. Сборка отчётов
-    html_p, json_p = build_reports(results, output_dir)
+    html_p, json_p, pdf_p = build_reports(results, output_dir)
 
     print("\n" + "=" * 60)
     print(f"✅ Проверка завершена! Обработано макетов: {len(results)}")
     print(f"📄 HTML-отчёт: {html_p}")
     print(f"📊 JSON-отчёт: {json_p}")
+    if pdf_p:
+        print(f"📕 PDF-отчёт:  {pdf_p}")
     print("=" * 60)
 
 if __name__ == "__main__":
