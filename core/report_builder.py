@@ -25,6 +25,7 @@ def build_reports(results: List[Tuple[ImageMetadata, ValidationResult, str]], ou
             "dimensions_mm": {"width": meta.width_mm, "height": meta.height_mm},
             "dpi": meta.dpi,
             "colorspace": meta.colorspace,
+            "icc_profile": meta.icc_profile,
             "size_mb": meta.size_mb,
             "validation_items": [
                 {

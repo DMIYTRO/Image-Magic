@@ -18,19 +18,20 @@ class ImageMetadata:
     width_mm: float
     height_mm: float
     colorspace: str
+    icc_profile: str
     image_type: str
     depth_bits: str
     size_mb: float
 
 def inspect_file(image_path: str) -> ImageMetadata:
-    """Извлекает метаданные из графического файла."""
+    """Извлекает метаданные из графического файла, включая ICC-профиль."""
     magick_cmd = shutil.which("magick") or shutil.which("identify")
     if not magick_cmd:
         raise FileNotFoundError("ImageMagick CLI (magick / identify) не найден в системе.")
 
     cmd = [
         magick_cmd, "identify",
-        "-format", "%f\n%m\n%w\n%h\n%x\n%y\n%[units]\n%[colorspace]\n%[type]\n%[depth]",
+        "-format", "%f\n%m\n%w\n%h\n%x\n%y\n%[units]\n%[colorspace]\n%[type]\n%[depth]\n%[icc:description]\n%[profile:icc]",
         image_path
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -45,6 +46,10 @@ def inspect_file(image_path: str) -> ImageMetadata:
     colorspace = lines[7] if len(lines) > 7 else "sRGB"
     img_type = lines[8] if len(lines) > 8 else ""
     depth = lines[9] if len(lines) > 9 else "8"
+    
+    icc_desc = lines[10] if len(lines) > 10 and lines[10] else ""
+    icc_prof = lines[11] if len(lines) > 11 and lines[11] else ""
+    icc_profile = icc_desc or icc_prof or "Не внедрен"
 
     if "Centimeter" in units:
         dpi = res_x * 2.54
@@ -67,6 +72,7 @@ def inspect_file(image_path: str) -> ImageMetadata:
         width_mm=width_mm,
         height_mm=height_mm,
         colorspace=colorspace,
+        icc_profile=icc_profile,
         image_type=img_type,
         depth_bits=depth,
         size_mb=size_mb

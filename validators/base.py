@@ -36,7 +36,17 @@ class BaseValidator:
             message="Цветовая модель CMYK" if colorspace_ok else f"Файл имеет цветовую модель {meta.colorspace}, требуется CMYK"
         ))
 
-        # 3. Проверка размера в мм
+        # 3. Проверка цветового профиля (ICC)
+        icc_ok = meta.icc_profile != "Не внедрен"
+        items.append(ValidationItem(
+            name="Цветовой профиль (ICC)",
+            actual_value=meta.icc_profile,
+            target_value="FOGRA39 / ISO Coated",
+            passed=icc_ok,
+            message="ICC профиль внедрен" if icc_ok else "Внимание: ICC профиль не найден в файле"
+        ))
+
+        # 4. Проверка размера в мм
         items.append(ValidationItem(
             name="Размер, мм",
             actual_value=f"{meta.width_mm} × {meta.height_mm}",
@@ -45,7 +55,7 @@ class BaseValidator:
             message="соответствует"
         ))
 
-        # 4. Проверка объема файла (МБ)
+        # 5. Проверка объема файла (МБ)
         size_ok = meta.size_mb <= self.profile.max_file_size_mb
         items.append(ValidationItem(
             name="Размер файла, Mb",
