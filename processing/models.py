@@ -31,10 +31,18 @@ class FileCheck:
     warnings: list[str] = field(default_factory=list)
     needs_resample: bool = False
     resample_target_mm: Optional[tuple[float, float]] = None
+    resample_decision: str = "accept"
+    resample_reason: Optional[str] = None
+    resample_scale: float = 1.0
+    resample_crop_mm: tuple[float, float] = (0.0, 0.0)
+    resample_effective_dpi: Optional[tuple[float, float]] = None
+    resample_confirmed: Optional[bool] = None
+    rotation_degrees: int = 0
+    orientation_verified: bool = False
 
     @property
     def passed(self) -> bool:
-        return not self.errors
+        return not self.errors and self.resample_decision != "ask_confirmation"
 
 
 @dataclass

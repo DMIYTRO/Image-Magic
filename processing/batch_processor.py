@@ -8,6 +8,7 @@ from core.inspector import count_frames, inspect_file
 from core.pdf_exporter import convert_image_to_pdf, merge_pdfs_with_ghostscript
 from core.preview_generator import generate_preview
 from core.resampler import resample_image
+from .resample_policy import ResampleDecision, analyze_resample
 
 from .filename_parser import parse_filename
 from .models import FileCheck, OrderCheck
@@ -102,44 +103,72 @@ class BatchProcessor:
         parsed = check.parsed
         expected = (parsed.width_mm + self.size_extra_mm, parsed.height_mm + self.size_extra_mm)
         actual = (check.actual_width_mm, check.actual_height_mm)
-        direct = self._dimensions_match(actual, expected)
-        rotated = self._dimensions_match(actual, (expected[1], expected[0]))
-        if not direct and not rotated:
-            eff_direct_x = (check.width_px / expected[0]) * 25.4 if check.width_px else 0
-            eff_direct_y = (check.height_px / expected[1]) * 25.4 if check.height_px else 0
-            eff_direct = min(eff_direct_x, eff_direct_y)
+        # The order of dimensions in the filename defines the format, not the
+        # visual top of the artwork. Accept both orientations without rotating.
+        # A possible face/back mismatch is handled later at order level.
+        plans = [
+            analyze_resample(
+                actual,
+                target,
+                (check.dpi_x or 0.0, check.dpi_y or 0.0),
+                min_dpi=self.min_dpi,
+                allow_rotation=False,
+            )
+            for target in (expected, (expected[1], expected[0]))
+        ]
+        decision_rank = {
+            ResampleDecision.ACCEPT: 0,
+            ResampleDecision.AUTO_CORRECT: 1,
+            ResampleDecision.ASK_CONFIRMATION: 2,
+            ResampleDecision.REJECT: 3,
+        }
+        plan = min(plans, key=lambda value: (decision_rank[value.decision], max(value.crop_mm)))
+        expected = plan.target_mm
+        check.resample_decision = plan.decision.value
+        check.resample_reason = plan.reason
+        check.resample_scale = plan.scale
+        check.resample_crop_mm = plan.crop_mm
+        check.resample_effective_dpi = plan.effective_dpi
+        check.rotation_degrees = plan.rotation_degrees
 
-            eff_rotated_x = (check.width_px / expected[1]) * 25.4 if check.width_px else 0
-            eff_rotated_y = (check.height_px / expected[0]) * 25.4 if check.height_px else 0
-            eff_rotated = min(eff_rotated_x, eff_rotated_y)
+        crop_text = f"обрезка {plan.crop_mm[0]:.2f}x{plan.crop_mm[1]:.2f} мм"
+        rotation_text = f", поворот на {plan.rotation_degrees}°" if plan.rotation_degrees else ""
+        if plan.decision == ResampleDecision.AUTO_CORRECT:
+            check.needs_resample = True
+            check.resample_target_mm = expected
+            check.warnings.append(
+                f"размер автоматически скорректирован: {actual[0]:.1f}x{actual[1]:.1f} → "
+                f"{expected[0]:.1f}x{expected[1]:.1f} мм; пропорции сохранены, {crop_text}{rotation_text}"
+            )
+        elif plan.decision == ResampleDecision.ASK_CONFIRMATION:
+            check.resample_target_mm = expected
+            check.warnings.append(
+                f"требуется подтверждение коррекции {actual[0]:.1f}x{actual[1]:.1f} → "
+                f"{expected[0]:.1f}x{expected[1]:.1f} мм; {crop_text}{rotation_text}"
+            )
+        elif plan.decision == ResampleDecision.REJECT:
+            check.errors.append(
+                f"размер {actual[0]:.1f}x{actual[1]:.1f} мм; ожидается "
+                f"{expected[0]:.1f}x{expected[1]:.1f} мм: {plan.reason}"
+            )
 
-            if eff_direct >= self.min_dpi:
-                target_mm = expected
-                eff_dpi = eff_direct
-            elif eff_rotated >= self.min_dpi:
-                target_mm = (expected[1], expected[0])
-                eff_dpi = eff_rotated
-            else:
-                target_mm = None
-
-            if target_mm is not None:
-                check.warnings.append(
-                    f"размер {actual[0]:.1f}x{actual[1]:.1f} мм больше ожидаемого {target_mm[0]:.1f}x{target_mm[1]:.1f} мм; "
-                    f"разрешён авто-ресемплинг до {self.min_dpi:.0f} DPI (эффективное разрешение {eff_dpi:.0f} DPI)"
-                )
-                check.needs_resample = True
-                check.resample_target_mm = target_mm
-            else:
-                check.errors.append(
-                    f"размер {actual[0]:.1f}x{actual[1]:.1f} мм; "
-                    f"ожидается {expected[0]:.1f}x{expected[1]:.1f} мм "
-                    f"(или с поворотом), допуск ±{self.tolerance_mm:.1f} мм"
-                )
+        if plan.rotation_degrees and plan.decision != ResampleDecision.REJECT:
+            check.warnings.append(
+                f"{parsed.side} будет автоматически повёрнут на {plan.rotation_degrees}°; "
+                "проверьте ориентацию и совмещение лица и оборота"
+            )
 
         if (check.colorspace or "").upper() not in {"CMYK", "COLORSEPARATION"}:
-            check.errors.append(f"цветовая модель {check.colorspace or 'не определена'}; требуется CMYK")
+            check.warnings.append(
+                f"цветовая модель {check.colorspace or 'не определена'} отличается от CMYK; "
+                "файл будет сохранён без преобразования цветовой модели"
+            )
 
-        if check.dpi is None or check.dpi < self.min_dpi:
+        correction_has_enough_dpi = (
+            plan.decision in {ResampleDecision.AUTO_CORRECT, ResampleDecision.ASK_CONFIRMATION}
+            and min(plan.effective_dpi) >= self.min_dpi
+        )
+        if (check.dpi is None or check.dpi < self.min_dpi) and not correction_has_enough_dpi:
             actual_dpi = (
                 f"{check.dpi_x:.1f}x{check.dpi_y:.1f}"
                 if check.dpi_x is not None and check.dpi_y is not None
@@ -156,6 +185,19 @@ class BatchProcessor:
 
     def _dimensions_match(self, actual: tuple[float, float], expected: tuple[float, float]) -> bool:
         return all(abs(a - e) <= self.tolerance_mm for a, e in zip(actual, expected))
+
+    @staticmethod
+    def confirm_resample(check: FileCheck, approved: bool) -> None:
+        if check.resample_decision != ResampleDecision.ASK_CONFIRMATION.value:
+            return
+        check.resample_confirmed = approved
+        if approved:
+            check.resample_decision = ResampleDecision.AUTO_CORRECT.value
+            check.needs_resample = True
+            check.warnings.append("коррекция размера подтверждена пользователем")
+        else:
+            check.resample_decision = ResampleDecision.REJECT.value
+            check.errors.append("пользователь отказался от предложенной коррекции размера")
 
     @staticmethod
     def _validate_order(order: OrderCheck) -> None:
@@ -175,8 +217,10 @@ class BatchProcessor:
             if item.actual_width_mm is not None and item.actual_height_mm is not None
         ]
         orientations = {
-            BatchProcessor._orientation(item.actual_width_mm, item.actual_height_mm)
-            for item in readable_files
+            BatchProcessor._orientation(
+                item.actual_height_mm if item.rotation_degrees in {90, 270} else item.actual_width_mm,
+                item.actual_width_mm if item.rotation_degrees in {90, 270} else item.actual_height_mm,
+            ) for item in readable_files
         }
         if len(orientations) > 1:
             details = ", ".join(
@@ -243,6 +287,7 @@ class BatchProcessor:
                                 target_width_mm=item.resample_target_mm[0],
                                 target_height_mm=item.resample_target_mm[1],
                                 target_dpi=self.min_dpi,
+                                rotation_degrees=item.rotation_degrees,
                             )
                             source_image_path = str(resampled_path)
                             dpi_arg = str(self.min_dpi)

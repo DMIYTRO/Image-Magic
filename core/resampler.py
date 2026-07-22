@@ -34,17 +34,20 @@ def parse_target_dimensions_from_filename(filename: str) -> Optional[Tuple[float
 def should_resample(meta: ImageMetadata, target_w_mm: float, target_h_mm: float, min_dpi: float = 280.0) -> bool:
     """Определяет, требуется ли автоматический даунсемплинг."""
     is_low_dpi = meta.dpi < min_dpi
-    is_larger_size = (meta.width_mm > target_w_mm + 2.0) or (meta.height_mm > target_h_mm + 2.0)
-    return is_low_dpi and is_larger_size
+    is_larger_size = meta.width_mm >= target_w_mm and meta.height_mm >= target_h_mm
+    proportional_height = target_w_mm * meta.height_px / meta.width_px
+    keeps_proportions = abs(proportional_height - target_h_mm) <= 0.5
+    return is_low_dpi and is_larger_size and keeps_proportions
 
 def resample_image(
     input_path: str,
     output_path: str,
     target_width_mm: float,
     target_height_mm: float,
-    target_dpi: float = 300.0
+    target_dpi: float = 300.0,
+    rotation_degrees: int = 0,
 ) -> str:
-    """Выполняет качественный даунсемплинг с фильтром Lanczos до целевого размера в мм и 300 DPI."""
+    """Proportionally fill and center-crop to the target without stretching."""
     magick_cmd = shutil.which("magick")
     if not magick_cmd:
         raise FileNotFoundError("ImageMagick (`magick`) не найден.")
@@ -55,12 +58,16 @@ def resample_image(
     target_w_px = round(target_width_mm * (target_dpi / 25.4))
     target_h_px = round(target_height_mm * (target_dpi / 25.4))
 
-    cmd = [
-        magick_cmd, input_path,
+    cmd = [magick_cmd, input_path]
+    if rotation_degrees:
+        cmd += ["-rotate", str(rotation_degrees)]
+    cmd += [
         "-units", "PixelsPerInch",
         "-density", str(target_dpi),
         "-filter", "Lanczos",
-        "-resize", f"{target_w_px}x{target_h_px}!",
+        "-resize", f"{target_w_px}x{target_h_px}^",
+        "-gravity", "center",
+        "-extent", f"{target_w_px}x{target_h_px}",
         output_path
     ]
 

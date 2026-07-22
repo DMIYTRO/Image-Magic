@@ -317,13 +317,30 @@ def build_orders_html_report(
                         img_src = str(p_candidate)
 
             if img_src:
+                rotation_note = (
+                    f'<div class="rotation-note">↻ Автоповорот: {f_item.rotation_degrees}°</div>'
+                    if getattr(f_item, "rotation_degrees", 0) else ""
+                )
+                rotation_controls = ""
+                if getattr(f_item, "rotation_degrees", 0):
+                    control_id = f"preview-{idx}-{f_item.parsed.side}"
+                    rotation_controls = f'''
+                    <div class="rotation-controls">
+                        <button type="button" onclick="rotatePreview('{control_id}', -90, event)">↶ 90°</button>
+                        <button type="button" onclick="rotatePreview('{control_id}', 90, event)">↷ 90°</button>
+                        <button type="button" onclick="resetPreview('{control_id}', event)">Сбросить</button>
+                    </div>'''
+                else:
+                    control_id = f"preview-{idx}-{f_item.parsed.side}"
                 preview_box = f"""
                 <div class="preview-thumb-card" onclick="openModal('{img_src}', 'Заказ #{order.order_id} — {label}')">
                     <div class="side-label">{label}</div>
                     <div class="img-wrapper">
-                        <img src="{img_src}" alt="{label}" class="preview-image" loading="lazy">
+                        <img id="{control_id}" src="{img_src}" alt="{label}" class="preview-image" loading="lazy" data-angle="0">
                         <div class="zoom-overlay">🔍 Нажмите для увеличения</div>
                     </div>
+                    {rotation_note}
+                    {rotation_controls}
                     <div class="thumb-filename" title="{f_item.path.name}">{f_item.path.name}</div>
                 </div>
                 """
@@ -364,6 +381,10 @@ def build_orders_html_report(
         back_sz = f"{back_file.actual_width_mm:.1f} × {back_file.actual_height_mm:.1f} мм" if back_file and back_file.actual_width_mm else "—"
         rows_code += render_param_row("Размер с вылетами", face_sz, back_sz, f"{expected_w:.1f} × {expected_h:.1f} мм", is_ok=order.passed)
 
+        face_rotation = f"{face_file.rotation_degrees}°" if face_file else "—"
+        back_rotation = f"{back_file.rotation_degrees}°" if back_file else "—"
+        rows_code += render_param_row("Автоматический поворот", face_rotation, back_rotation, "минимально необходимый")
+
         # 2. Разрешение DPI
         face_dpi = f"{face_file.dpi_x:.0f}×{face_file.dpi_y:.0f} DPI" if face_file and face_file.dpi_x else "—"
         back_dpi = f"{back_file.dpi_x:.0f}×{back_file.dpi_y:.0f} DPI" if back_file and back_file.dpi_x else "—"
@@ -390,6 +411,17 @@ def build_orders_html_report(
         if all_warnings:
             warn_items = "".join(f"<li>{w}</li>" for w in all_warnings)
             messages_html += f'<div class="msg-box box-warning"><strong>⚠️ Попередження / Авто-ресемплинг:</strong><ul>{warn_items}</ul></div>'
+
+        rotated_files = [f for f in order.files if getattr(f, "rotation_degrees", 0)]
+        if rotated_files:
+            rotation_items = ", ".join(
+                f"{f.parsed.side}: {f.rotation_degrees}°" for f in rotated_files
+            )
+            messages_html += (
+                '<div class="msg-box box-orientation"><strong>⚠️ Требуется визуальная проверка.</strong> '
+                f'Автоматически повёрнуто: {rotation_items}. Проверьте ориентацию и совмещение лица и оборота.'
+                '<label class="verify-label"><input type="checkbox"> Совмещение проверено пользователем</label></div>'
+            )
 
         if order.passed and not all_warnings:
             messages_html += '<div class="msg-box box-pass"><strong>✅ Заказ полностью соответствует стандартам допечатной подготовки.</strong></div>'
@@ -685,6 +717,11 @@ def build_orders_html_report(
         }}
         .badge-pass {{ background: #d1fae5; color: #065f46; }}
         .badge-warning {{ background: #fef3c7; color: #92400e; }}
+        .box-orientation {{ background: #fff7ed; border: 2px solid #fb923c; color: #9a3412; }}
+        .verify-label {{ display: block; margin-top: 10px; font-weight: 700; }}
+        .rotation-note {{ margin-top: 8px; color: #9a3412; font-weight: 700; font-size: 12px; }}
+        .rotation-controls {{ display: flex; gap: 6px; justify-content: center; margin-top: 8px; }}
+        .rotation-controls button {{ border: 1px solid var(--border-color); background: white; border-radius: 6px; padding: 5px 8px; cursor: pointer; }}
         .badge-fail {{ background: #fee2e2; color: #991b1b; }}
 
         /* Card Main Grid: Previews Left, Table Right */
@@ -1107,6 +1144,21 @@ def build_orders_html_report(
             if (e.target.id === 'lightboxModal' || e.target.classList.contains('lightbox-close-btn')) {{
                 document.getElementById('lightboxModal').classList.remove('active');
             }}
+        }}
+
+        function rotatePreview(id, delta, event) {{
+            event.stopPropagation();
+            const image = document.getElementById(id);
+            const angle = Number(image.dataset.angle || 0) + delta;
+            image.dataset.angle = angle;
+            image.style.transform = `rotate(${{angle}}deg)`;
+        }}
+
+        function resetPreview(id, event) {{
+            event.stopPropagation();
+            const image = document.getElementById(id);
+            image.dataset.angle = 0;
+            image.style.transform = 'rotate(0deg)';
         }}
 
         document.addEventListener('keydown', (e) => {{

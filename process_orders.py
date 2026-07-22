@@ -147,6 +147,21 @@ def main() -> None:
     except Exception as exc:
         raise SystemExit(f"Ошибка: {exc}") from exc
 
+    pending = [
+        item for order in orders for item in order.files
+        if item.resample_decision == "ask_confirmation"
+    ]
+    for item in pending:
+        crop_x, crop_y = item.resample_crop_mm
+        rotation = f", поворот {item.rotation_degrees}°" if item.rotation_degrees else ""
+        answer = input(
+            f"\nФайл {item.path.name}: требуется коррекция до "
+            f"{item.resample_target_mm[0]:.1f}x{item.resample_target_mm[1]:.1f} мм "
+            f"(центральная обрезка {crop_x:.2f}x{crop_y:.2f} мм{rotation}). "
+            "Выполнить? [y/N]: "
+        ).strip().lower()
+        processor.confirm_resample(item, answer in {"y", "yes", "д", "да"})
+
     print_report(processor, orders)
     troubles_dir = args.input / TROUBLES_DIR_NAME
     trouble_results = processor.copy_failed_to_troubles(orders, troubles_dir)
