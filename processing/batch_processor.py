@@ -6,6 +6,8 @@ import tempfile
 
 from core.inspector import count_frames, inspect_file
 from core.pdf_exporter import convert_image_to_pdf, merge_pdfs_with_ghostscript
+from core.preview_generator import generate_preview
+from core.resampler import resample_image
 
 from .filename_parser import parse_filename
 from .models import FileCheck, OrderCheck
@@ -72,6 +74,8 @@ class BatchProcessor:
                 meta = inspect_file(str(path))
                 check.actual_width_mm = meta.width_mm
                 check.actual_height_mm = meta.height_mm
+                check.width_px = meta.width_px
+                check.height_px = meta.height_px
                 check.dpi = meta.dpi
                 check.dpi_x = meta.dpi_x
                 check.dpi_y = meta.dpi_y
@@ -101,11 +105,36 @@ class BatchProcessor:
         direct = self._dimensions_match(actual, expected)
         rotated = self._dimensions_match(actual, (expected[1], expected[0]))
         if not direct and not rotated:
-            check.errors.append(
-                f"размер {actual[0]:.1f}x{actual[1]:.1f} мм; "
-                f"ожидается {expected[0]:.1f}x{expected[1]:.1f} мм "
-                f"(или с поворотом), допуск ±{self.tolerance_mm:.1f} мм"
-            )
+            eff_direct_x = (check.width_px / expected[0]) * 25.4 if check.width_px else 0
+            eff_direct_y = (check.height_px / expected[1]) * 25.4 if check.height_px else 0
+            eff_direct = min(eff_direct_x, eff_direct_y)
+
+            eff_rotated_x = (check.width_px / expected[1]) * 25.4 if check.width_px else 0
+            eff_rotated_y = (check.height_px / expected[0]) * 25.4 if check.height_px else 0
+            eff_rotated = min(eff_rotated_x, eff_rotated_y)
+
+            if eff_direct >= self.min_dpi:
+                target_mm = expected
+                eff_dpi = eff_direct
+            elif eff_rotated >= self.min_dpi:
+                target_mm = (expected[1], expected[0])
+                eff_dpi = eff_rotated
+            else:
+                target_mm = None
+
+            if target_mm is not None:
+                check.warnings.append(
+                    f"размер {actual[0]:.1f}x{actual[1]:.1f} мм больше ожидаемого {target_mm[0]:.1f}x{target_mm[1]:.1f} мм; "
+                    f"разрешён авто-ресемплинг до {self.min_dpi:.0f} DPI (эффективное разрешение {eff_dpi:.0f} DPI)"
+                )
+                check.needs_resample = True
+                check.resample_target_mm = target_mm
+            else:
+                check.errors.append(
+                    f"размер {actual[0]:.1f}x{actual[1]:.1f} мм; "
+                    f"ожидается {expected[0]:.1f}x{expected[1]:.1f} мм "
+                    f"(или с поворотом), допуск ±{self.tolerance_mm:.1f} мм"
+                )
 
         if (check.colorspace or "").upper() not in {"CMYK", "COLORSEPARATION"}:
             check.errors.append(f"цветовая модель {check.colorspace or 'не определена'}; требуется CMYK")
@@ -203,11 +232,26 @@ class BatchProcessor:
                 ) as temporary_dir:
                     page_pdfs = []
                     for page_number, item in enumerate(ordered_files, start=1):
+                        source_image_path = str(item.path)
+                        dpi_arg = f"{item.dpi_x}x{item.dpi_y}"
+
+                        if item.needs_resample and item.resample_target_mm:
+                            resampled_path = Path(temporary_dir) / f"resampled_{page_number}_{item.parsed.side}{item.path.suffix}"
+                            resample_image(
+                                str(item.path),
+                                str(resampled_path),
+                                target_width_mm=item.resample_target_mm[0],
+                                target_height_mm=item.resample_target_mm[1],
+                                target_dpi=self.min_dpi,
+                            )
+                            source_image_path = str(resampled_path)
+                            dpi_arg = str(self.min_dpi)
+
                         page_path = Path(temporary_dir) / f"{page_number}_{item.parsed.side}.pdf"
                         convert_image_to_pdf(
-                            str(item.path),
+                            source_image_path,
                             str(page_path),
-                            dpi=f"{item.dpi_x}x{item.dpi_y}",
+                            dpi=dpi_arg,
                             compression="none",
                         )
                         page_pdfs.append(str(page_path))
@@ -242,6 +286,7 @@ class BatchProcessor:
         page_pattern = validation_dir / "page-%03d.png"
         command = [
             gs_cmd,
+            "-q",
             "-dSAFER",
             "-dBATCH",
             "-dNOPAUSE",
@@ -263,7 +308,11 @@ class BatchProcessor:
 
         for page_number, (rendered_page, source) in enumerate(zip(rendered_pages, ordered_files), start=1):
             page_meta = inspect_file(str(rendered_page))
-            expected = (source.actual_width_mm, source.actual_height_mm)
+            expected = (
+                source.resample_target_mm
+                if (source.needs_resample and source.resample_target_mm)
+                else (source.actual_width_mm, source.actual_height_mm)
+            )
             actual = (page_meta.width_mm, page_meta.height_mm)
             # A 72-DPI control render has a rounding step of about 0.35 mm.
             validation_tolerance = max(self.tolerance_mm, 0.6)
@@ -340,4 +389,89 @@ class BatchProcessor:
                 results.append((item.path, target_path, None))
             except Exception as exc:
                 results.append((item.path, target_path, str(exc)))
+        return results
+
+    def generate_pdf_previews(
+        self,
+        pdf_path: Path,
+        preview_dir: Path,
+        render_dpi: float = 150.0,
+        safe_zone_mm: float = 4.0,
+        bleed_mm: float = 1.0,
+        page_names: Optional[list[str]] = None,
+    ) -> list[Path]:
+        """Рендерит страницы PDF и генерирует превью с рамками (1 мм зелёная наружная, 4 мм красная внутренняя)."""
+        gs_cmd = shutil.which("gs")
+        if not gs_cmd:
+            raise FileNotFoundError("Ghostscript (`gs`) не найден для рендеринга превью.")
+
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        created_previews: list[Path] = []
+
+        with tempfile.TemporaryDirectory(prefix=f".preview_{pdf_path.stem}_") as temp_dir:
+            temp_path = Path(temp_dir)
+            page_pattern = temp_path / "page-%03d.png"
+            command = [
+                gs_cmd,
+                "-q",
+                "-dSAFER",
+                "-dBATCH",
+                "-dNOPAUSE",
+                "-sDEVICE=png16m",
+                f"-r{int(render_dpi)}",
+                f"-sOutputFile={page_pattern}",
+                str(pdf_path),
+            ]
+            result = subprocess.run(command, capture_output=True, text=True)
+            if result.returncode != 0:
+                details = (result.stderr or result.stdout).strip()
+                raise ValueError(f"ошибка рендеринга PDF для превью: {details}")
+
+            rendered_pages = sorted(temp_path.glob("page-*.png"))
+            if not rendered_pages:
+                raise ValueError("не удалось извлечь страницы из PDF")
+
+            total_pages = len(rendered_pages)
+            for idx, rendered_page in enumerate(rendered_pages, start=1):
+                meta = inspect_file(str(rendered_page))
+                if page_names and idx <= len(page_names):
+                    base_name = page_names[idx - 1]
+                    preview_filename = f"{base_name}_preview.png"
+                elif total_pages == 1:
+                    preview_filename = f"{pdf_path.stem}_preview.png"
+                else:
+                    preview_filename = f"{pdf_path.stem}_page{idx}_preview.png"
+
+                output_preview_path = preview_dir / preview_filename
+                generate_preview(
+                    input_path=str(rendered_page),
+                    output_preview_path=str(output_preview_path),
+                    dpi=meta.dpi or render_dpi,
+                    w_px=meta.width_px,
+                    h_px=meta.height_px,
+                    safe_zone_mm=safe_zone_mm,
+                    bleed_mm=bleed_mm,
+                )
+                created_previews.append(output_preview_path)
+
+        return created_previews
+
+    def generate_previews_for_all(
+        self,
+        pdf_paths: list[Path],
+        preview_dir: Path,
+        pdf_page_names_map: Optional[dict[Path, list[str]]] = None,
+    ) -> list[tuple[Path, list[Path], str | None]]:
+        """Генерирует превью с рамками для всех передаваемых PDF файлов."""
+        results = []
+        pdf_map = pdf_page_names_map or {}
+        for pdf_path in pdf_paths:
+            try:
+                page_names = pdf_map.get(pdf_path)
+                previews = self.generate_pdf_previews(
+                    pdf_path, preview_dir, page_names=page_names
+                )
+                results.append((pdf_path, previews, None))
+            except Exception as exc:
+                results.append((pdf_path, [], str(exc)))
         return results

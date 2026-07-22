@@ -15,10 +15,12 @@ def generate_preview(
     safe_zone_mm: float = 4.0,
     bleed_mm: float = 1.0
 ) -> str:
-    """Отрисовывает превью макета с наложением красной (1 мм) и зеленой (4 мм) рамок."""
+    """Отрисовывает превью макета с наложением зеленой наружной (1 мм) и красной внутренней (4 мм) рамок."""
     magick_cmd = shutil.which("magick")
     if not magick_cmd:
         raise FileNotFoundError("Утилита ImageMagick (`magick`) не найдена в системе.")
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_preview_path)), exist_ok=True)
 
     # Расчет отступов в пикселях
     safe_px = round(safe_zone_mm * (dpi / 25.4))
@@ -37,11 +39,11 @@ def generate_preview(
 
     cmd = [
         magick_cmd, input_path,
-        "-stroke", "#dc3545",
+        "-stroke", "#28a745",
         "-strokewidth", str(border_px),
         "-fill", "none",
         "-draw", f"rectangle {rx1},{ry1} {rx2},{ry2}",
-        "-stroke", "#28a745",
+        "-stroke", "#dc3545",
         "-strokewidth", str(max(2, round(border_px * 0.4))),
         "-fill", "none",
         "-draw", f"rectangle {gx1},{gy1} {gx2},{gy2}",

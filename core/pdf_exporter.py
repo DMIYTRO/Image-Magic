@@ -46,6 +46,7 @@ def merge_pdfs_with_ghostscript(input_pdf_paths: List[str], output_pdf_path: str
     os.makedirs(os.path.dirname(os.path.abspath(output_pdf_path)), exist_ok=True)
     cmd = [
         gs_cmd,
+        "-q",
         "-dSAFER",
         "-dBATCH",
         "-dNOPAUSE",

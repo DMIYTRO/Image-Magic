@@ -4,7 +4,9 @@
 
 import os
 import json
-from typing import List, Tuple
+from datetime import datetime
+from pathlib import Path
+from typing import List, Tuple, Union, Optional
 from core.inspector import ImageMetadata
 from validators.rules import ValidationResult
 
@@ -250,3 +252,945 @@ def build_reports(results: List[Tuple[ImageMetadata, ValidationResult, str]], ou
         pdf_path = ""
 
     return html_path, json_path, pdf_path
+
+
+def build_orders_html_report(
+    orders: list,
+    output_html_path: Union[str, Path],
+    preview_dir: Optional[Path] = None,
+) -> str:
+    """Генерирует современный интерактивный HTML-отчёт для списка заказов."""
+    out_path = Path(output_html_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    order_cards_html = ""
+    pass_count = 0
+    warn_count = 0
+    fail_count = 0
+
+    for idx, order in enumerate(orders, start=1):
+        has_warnings = bool(order.warnings or any(f.warnings for f in order.files))
+        if not order.passed:
+            status_code = "fail"
+            status_badge = '<span class="status-badge badge-fail">❌ ОШИБКА</span>'
+            fail_count += 1
+        elif has_warnings:
+            status_code = "warning"
+            status_badge = '<span class="status-badge badge-warning">⚠️ ПРЕДУПРЕЖДЕНИЕ</span>'
+            warn_count += 1
+        else:
+            status_code = "pass"
+            status_badge = '<span class="status-badge badge-pass">✅ ПРОЙДЕН</span>'
+            pass_count += 1
+
+        first_parsed = order.files[0].parsed if order.files and order.files[0].parsed else None
+        customer_id = order.customer_id
+        color_mode = (
+            f"{first_parsed.front_colors}-{first_parsed.back_colors}"
+            if first_parsed
+            else "4-4"
+        )
+        expected_w = (first_parsed.width_mm + 4.0) if first_parsed else 0.0
+        expected_h = (first_parsed.height_mm + 4.0) if first_parsed else 0.0
+
+        face_file = next((f for f in order.files if f.parsed and f.parsed.side == "face"), None)
+        back_file = next((f for f in order.files if f.parsed and f.parsed.side == "back"), None)
+        if not face_file and order.files:
+            face_file = order.files[0]
+
+        # Превью для лица и оборота
+        previews_html = ""
+        sides_to_check = [("Лицо (Face)", face_file)]
+        if back_file:
+            sides_to_check.append(("Оборот (Back)", back_file))
+
+        for label, f_item in sides_to_check:
+            if not f_item:
+                continue
+            img_src = ""
+            if preview_dir:
+                p_candidate = preview_dir / f"{f_item.path.stem}_preview.png"
+                if p_candidate.is_file():
+                    try:
+                        img_src = os.path.relpath(p_candidate, out_path.parent)
+                    except ValueError:
+                        img_src = str(p_candidate)
+
+            if img_src:
+                preview_box = f"""
+                <div class="preview-thumb-card" onclick="openModal('{img_src}', 'Заказ #{order.order_id} — {label}')">
+                    <div class="side-label">{label}</div>
+                    <div class="img-wrapper">
+                        <img src="{img_src}" alt="{label}" class="preview-image" loading="lazy">
+                        <div class="zoom-overlay">🔍 Нажмите для увеличения</div>
+                    </div>
+                    <div class="thumb-filename" title="{f_item.path.name}">{f_item.path.name}</div>
+                </div>
+                """
+            else:
+                preview_box = f"""
+                <div class="preview-thumb-card no-img">
+                    <div class="side-label">{label}</div>
+                    <div class="img-wrapper" style="height: 200px; display: flex; align-items: center; justify-content: center; background: #f1f5f9; color: #94a3b8; font-size: 13px; font-weight: 600;">🖼 Превью отсутствует</div>
+                    <div class="thumb-filename" title="{f_item.path.name}">{f_item.path.name}</div>
+                </div>
+                """
+            previews_html += preview_box
+
+        # Формирование таблицы параметров
+        has_back = bool(back_file)
+        table_headers = """
+            <tr>
+                <th style="width: 35%;">Параметр</th>
+                <th style="width: 25%;">Лицо (Face)</th>
+        """
+        if has_back:
+            table_headers += '<th style="width: 25%;">Оборот (Back)</th>'
+        table_headers += '<th style="width: 15%;">Норма</th></tr>'
+
+        def render_param_row(name, face_val, back_val, target_val, is_ok=True):
+            status_icon = "✔" if is_ok else "✖"
+            icon_cls = "pass" if is_ok else "fail"
+            row = f'<tr><td class="param-title"><span class="status-icon {icon_cls}">{status_icon}</span> {name}</td>'
+            row += f'<td>{face_val}</td>'
+            if has_back:
+                row += f'<td>{back_val if back_val is not None else "—"}</td>'
+            row += f'<td>{target_val}</td></tr>'
+            return row
+
+        rows_code = ""
+        # 1. Размер
+        face_sz = f"{face_file.actual_width_mm:.1f} × {face_file.actual_height_mm:.1f} мм" if face_file and face_file.actual_width_mm else "не определён"
+        back_sz = f"{back_file.actual_width_mm:.1f} × {back_file.actual_height_mm:.1f} мм" if back_file and back_file.actual_width_mm else "—"
+        rows_code += render_param_row("Размер с вылетами", face_sz, back_sz, f"{expected_w:.1f} × {expected_h:.1f} мм", is_ok=order.passed)
+
+        # 2. Разрешение DPI
+        face_dpi = f"{face_file.dpi_x:.0f}×{face_file.dpi_y:.0f} DPI" if face_file and face_file.dpi_x else "—"
+        back_dpi = f"{back_file.dpi_x:.0f}×{back_file.dpi_y:.0f} DPI" if back_file and back_file.dpi_x else "—"
+        rows_code += render_param_row("Разрешение (DPI)", face_dpi, back_dpi, "≥ 300 DPI")
+
+        # 3. Цветность
+        face_col = face_file.colorspace if face_file else "—"
+        back_col = back_file.colorspace if back_file else "—"
+        rows_code += render_param_row("Цветовая модель", face_col, back_col, "CMYK")
+
+        # 4. Формат
+        face_fmt = face_file.actual_format if face_file else "—"
+        back_fmt = back_file.actual_format if back_file else "—"
+        rows_code += render_param_row("Формат файла", face_fmt, back_fmt, "TIFF/JPEG/PDF")
+
+        # Сообщения статуса/ошибок/попереджень
+        messages_html = ""
+        if order.errors or any(f.errors for f in order.files):
+            err_list = order.errors + [err for f in order.files for err in f.errors]
+            err_items = "".join(f"<li>{e}</li>" for e in err_list)
+            messages_html += f'<div class="msg-box box-fail"><strong>❌ Ошибки проверки:</strong><ul>{err_items}</ul></div>'
+
+        all_warnings = order.warnings + [w for f in order.files for w in f.warnings]
+        if all_warnings:
+            warn_items = "".join(f"<li>{w}</li>" for w in all_warnings)
+            messages_html += f'<div class="msg-box box-warning"><strong>⚠️ Попередження / Авто-ресемплинг:</strong><ul>{warn_items}</ul></div>'
+
+        if order.passed and not all_warnings:
+            messages_html += '<div class="msg-box box-pass"><strong>✅ Заказ полностью соответствует стандартам допечатной подготовки.</strong></div>'
+
+        order_cards_html += f"""
+        <article class="order-card" data-status="{status_code}">
+            <div class="card-header-bar">
+                <div class="order-checkbox-group">
+                    <input type="checkbox" class="order-checkbox" onchange="updateSelectedCount()">
+                    <span class="order-num">Заказ #{order.order_id}</span>
+                </div>
+                <div class="order-meta-info">
+                    <span class="meta-item">Клиент ID: <strong>{customer_id}</strong></span>
+                    <span class="meta-item">Красочность: <strong>{color_mode}</strong></span>
+                    <span class="meta-item">Размер макета: <strong>{first_parsed.width_mm:.0f}×{first_parsed.height_mm:.0f} мм</strong></span>
+                </div>
+                <div>
+                    {status_badge}
+                </div>
+            </div>
+
+            <div class="card-body-grid">
+                <!-- Левая колонка: Превью -->
+                <div class="previews-column">
+                    <span class="previews-box-title">Превью макетов</span>
+                    <div class="previews-row {'single' if not back_file else 'double'}">
+                        {previews_html}
+                    </div>
+                    <div class="frame-legend">
+                        <span><span class="legend-dot green"></span> Зелёный контур (1 мм) — Край реза</span>
+                        <span><span class="legend-dot red"></span> Красный контур (4 мм) — Безопасная зона</span>
+                    </div>
+                </div>
+
+                <!-- Правая колонка: Статус и таблица -->
+                <div class="details-column">
+                    <table class="specs-table">
+                        <thead>
+                            {table_headers}
+                        </thead>
+                        <tbody>
+                            {rows_code}
+                        </tbody>
+                    </table>
+
+                    {messages_html}
+                </div>
+            </div>
+        </article>
+        """
+
+    total_orders = len(orders)
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    html_template = f"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Отчёт допечатного контроля макетов (Image-Magic Audit)</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {{
+            --bg-color: #f1f5f9;
+            --card-bg: #ffffff;
+            --text-primary: #0f172a;
+            --text-secondary: #64748b;
+            --border-color: #e2e8f0;
+            --pass-color: #10b981;
+            --pass-bg: #ecfdf5;
+            --pass-border: #a7f3d0;
+            --warning-color: #f59e0b;
+            --warning-bg: #fffbeb;
+            --warning-border: #fde68a;
+            --fail-color: #ef4444;
+            --fail-bg: #fef2f2;
+            --fail-border: #fecaca;
+            --brand-primary: #2563eb;
+            --brand-hover: #1d4ed8;
+        }}
+
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+
+        body {{
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            padding: 30px 20px 100px 20px;
+            line-height: 1.5;
+        }}
+
+        .container {{
+            max-width: 1680px;
+            margin: 0 auto;
+        }}
+
+        /* Main Header */
+        .main-header {{
+            background: var(--card-bg);
+            border-radius: 14px;
+            border: 1px solid var(--border-color);
+            padding: 24px 30px;
+            margin-bottom: 24px;
+            box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.05);
+        }}
+
+        .header-top {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 20px;
+            margin-bottom: 20px;
+        }}
+
+        .header-title h1 {{
+            font-size: 24px;
+            font-weight: 800;
+            color: var(--text-primary);
+            letter-spacing: -0.5px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }}
+
+        .header-title p {{
+            color: var(--text-secondary);
+            font-size: 14px;
+            margin-top: 4px;
+        }}
+
+        /* Stats Row */
+        .stats-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 12px;
+            margin-bottom: 20px;
+        }}
+
+        .stat-card {{
+            background: #f8fafc;
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            padding: 12px 18px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }}
+
+        .stat-label {{ font-size: 13px; font-weight: 600; color: var(--text-secondary); }}
+        .stat-value {{ font-size: 20px; font-weight: 800; }}
+        .stat-value.pass {{ color: var(--pass-color); }}
+        .stat-value.warn {{ color: var(--warning-color); }}
+        .stat-value.fail {{ color: var(--fail-color); }}
+
+        /* Filter Controls & Select All */
+        .controls-row {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 16px;
+            padding-top: 16px;
+            border-top: 1px solid var(--border-color);
+        }}
+
+        .select-all-label {{
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 14px;
+            font-weight: 700;
+            color: var(--text-primary);
+            cursor: pointer;
+            user-select: none;
+        }}
+
+        .select-all-label input[type="checkbox"] {{
+            width: 18px;
+            height: 18px;
+            accent-color: var(--brand-primary);
+            cursor: pointer;
+        }}
+
+        .filter-pills {{
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }}
+
+        .filter-btn {{
+            background: #f1f5f9;
+            border: 1px solid var(--border-color);
+            padding: 7px 16px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }}
+
+        .filter-btn:hover, .filter-btn.active {{
+            background: var(--brand-primary);
+            color: #ffffff;
+            border-color: var(--brand-primary);
+        }}
+
+        .count-tag {{
+            background: rgba(255, 255, 255, 0.25);
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 11px;
+        }}
+
+        /* Order Cards Layout */
+        .orders-list {{
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }}
+
+        .order-card {{
+            background: var(--card-bg);
+            border-radius: 14px;
+            border: 1px solid var(--border-color);
+            overflow: hidden;
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.03);
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
+        }}
+
+        .order-card.selected {{
+            border-color: var(--brand-primary);
+            box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+        }}
+
+        /* Card Header */
+        .card-header-bar {{
+            background: #f8fafc;
+            border-bottom: 1px solid var(--border-color);
+            padding: 14px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 12px;
+        }}
+
+        .order-checkbox-group {{
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }}
+
+        .order-checkbox {{
+            width: 19px;
+            height: 19px;
+            accent-color: var(--brand-primary);
+            cursor: pointer;
+        }}
+
+        .order-num {{
+            font-size: 16px;
+            font-weight: 800;
+            color: var(--text-primary);
+        }}
+
+        .order-meta-info {{
+            display: flex;
+            gap: 16px;
+            font-size: 13px;
+            color: var(--text-secondary);
+        }}
+
+        .meta-item strong {{
+            color: var(--text-primary);
+        }}
+
+        /* Status Badge */
+        .status-badge {{
+            padding: 5px 14px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 700;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }}
+        .badge-pass {{ background: #d1fae5; color: #065f46; }}
+        .badge-warning {{ background: #fef3c7; color: #92400e; }}
+        .badge-fail {{ background: #fee2e2; color: #991b1b; }}
+
+        /* Card Main Grid: Previews Left, Table Right */
+        .card-body-grid {{
+            display: grid;
+            grid-template-columns: minmax(300px, 45%) 1fr;
+            gap: 24px;
+            padding: 20px 24px;
+            align-items: start;
+        }}
+
+        @media (max-width: 980px) {{
+            .card-body-grid {{
+                grid-template-columns: 1fr;
+            }}
+        }}
+
+        /* Previews Column */
+        .previews-column {{
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            overflow: hidden;
+        }}
+
+        .previews-box-title {{
+            font-size: 12px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-secondary);
+        }}
+
+        .previews-row {{
+            min-width: 0;
+            display: grid;
+            gap: 12px;
+            background: #f8fafc;
+            padding: 12px;
+            border-radius: 10px;
+            border: 1px dashed var(--border-color);
+            max-width: 100%;
+        }}
+
+        .previews-row.double {{ grid-template-columns: 1fr 1fr; }}
+        .previews-row.single {{ grid-template-columns: 1fr; }}
+
+        .preview-thumb-card {{
+            min-width: 0;
+            max-width: 100%;
+            overflow: hidden;
+            background: #ffffff;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            padding: 8px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            position: relative;
+        }}
+
+        .preview-thumb-card:hover {{
+            border-color: var(--brand-primary);
+            box-shadow: 0 4px 12px rgba(37, 99, 235, 0.12);
+            transform: translateY(-2px);
+        }}
+
+        .side-label {{
+            font-size: 11px;
+            font-weight: 700;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            margin-bottom: 6px;
+        }}
+
+        .img-wrapper {{
+            position: relative;
+            width: 100%;
+            height: 230px;
+            background: #ffffff;
+            border-radius: 4px;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }}
+
+        .preview-image {{
+            max-width: 100%;
+            max-height: 100%;
+            width: auto;
+            height: auto;
+            object-fit: contain;
+            display: block;
+            margin: 0 auto;
+        }}
+
+        .zoom-overlay {{
+            position: absolute;
+            inset: 0;
+            background: rgba(15, 23, 42, 0.6);
+            color: #ffffff;
+            font-size: 11px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            transition: opacity 0.2s ease;
+        }}
+
+        .preview-thumb-card:hover .zoom-overlay {{
+            opacity: 1;
+        }}
+
+        .thumb-filename {{
+            font-size: 10px;
+            color: var(--text-secondary);
+            margin-top: 6px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }}
+
+        /* Frame Legend */
+        .frame-legend {{
+            display: flex;
+            justify-content: center;
+            gap: 16px;
+            font-size: 11px;
+            color: var(--text-secondary);
+            margin-top: 4px;
+        }}
+
+        .legend-dot {{ width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 4px; }}
+        .legend-dot.green {{ background-color: var(--pass-color); }}
+        .legend-dot.red {{ background-color: var(--fail-color); }}
+
+        /* Inspection Details Column */
+        .details-column {{
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }}
+
+        .specs-table {{
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+            margin-bottom: 12px;
+        }}
+
+        .specs-table th {{
+            background: #f1f5f9;
+            color: var(--text-secondary);
+            font-weight: 700;
+            text-transform: uppercase;
+            font-size: 11px;
+            letter-spacing: 0.5px;
+            padding: 8px 12px;
+            text-align: left;
+            border-bottom: 2px solid var(--border-color);
+        }}
+
+        .specs-table td {{
+            padding: 8px 12px;
+            border-bottom: 1px solid var(--border-color);
+            color: var(--text-primary);
+        }}
+
+        .param-cell {{
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }}
+
+        .icon-check {{
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            font-weight: 800;
+            color: white;
+        }}
+        .icon-check.pass {{ background: var(--pass-color); }}
+        .icon-check.fail {{ background: var(--fail-color); }}
+
+        /* Status & Alert Boxes */
+        .alert-box {{
+            padding: 12px 16px;
+            border-radius: 8px;
+            font-size: 13px;
+            margin-top: 10px;
+        }}
+        .alert-box.pass {{ background: var(--pass-bg); border: 1px solid var(--pass-border); color: #065f46; }}
+        .alert-box.warning {{ background: var(--warning-bg); border: 1px solid var(--warning-border); color: #92400e; }}
+        .alert-box.fail {{ background: var(--fail-bg); border: 1px solid var(--fail-border); color: #991b1b; }}
+        .alert-box ul {{ margin-left: 18px; margin-top: 4px; }}
+
+        /* Sticky Action Bar at Bottom */
+        .bottom-action-bar {{
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: #ffffff;
+            border-top: 1px solid var(--border-color);
+            padding: 14px 30px;
+            box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.08);
+            z-index: 1000;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 16px;
+        }}
+
+        .action-info {{
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 14px;
+            font-weight: 700;
+            color: var(--text-primary);
+        }}
+
+        .selected-count-badge {{
+            background: var(--brand-primary);
+            color: #ffffff;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+        }}
+
+        .action-buttons {{
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+        }}
+
+        .btn-action {{
+            padding: 10px 22px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 700;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            transition: all 0.2s ease;
+            border: 1px solid transparent;
+        }}
+
+        .btn-print {{
+            background-color: var(--pass-color);
+            color: #ffffff;
+        }}
+
+        .btn-print:hover {{
+            background-color: #059669;
+            box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+        }}
+
+        .btn-reject {{
+            background-color: #ffffff;
+            color: var(--fail-color);
+            border-color: var(--fail-color);
+        }}
+
+        .btn-reject:hover {{
+            background-color: var(--fail-bg);
+            box-shadow: 0 4px 12px rgba(239, 68, 68, 0.15);
+        }}
+
+        /* Lightbox Modal */
+        .lightbox-modal {{
+            display: none;
+            position: fixed;
+            inset: 0;
+            z-index: 9999;
+            background: rgba(15, 23, 42, 0.85);
+            backdrop-filter: blur(4px);
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }}
+
+        .lightbox-modal.active {{ display: flex; }}
+
+        .lightbox-box {{
+            max-width: 90vw;
+            max-height: 90vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            position: relative;
+        }}
+
+        .lightbox-img {{
+            max-width: 100%;
+            max-height: 80vh;
+            border-radius: 8px;
+            background: #ffffff;
+            object-fit: contain;
+            box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5);
+        }}
+
+        .lightbox-title {{
+            color: #ffffff;
+            margin-top: 14px;
+            font-size: 15px;
+            font-weight: 600;
+        }}
+
+        .lightbox-close-btn {{
+            position: absolute;
+            top: -42px;
+            right: 0;
+            color: #ffffff;
+            font-size: 30px;
+            font-weight: 700;
+            cursor: pointer;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Main Header -->
+        <header class="main-header">
+            <div class="header-top">
+                <div class="header-title">
+                    <h1>✨ Image-Magic Audit • Отчёт допечатного контроля</h1>
+                    <p>Пакетный анализ и автоматическая подготовка печатных файлов к производству • Дата: {now_str}</p>
+                </div>
+            </div>
+
+            <!-- Stats Bar -->
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <span class="stat-label">Всего заказов</span>
+                    <span class="stat-value">{total_orders}</span>
+                </div>
+                <div class="stat-card">
+                    <span class="stat-label">Прошли проверку</span>
+                    <span class="stat-value pass">{pass_count}</span>
+                </div>
+                <div class="stat-card">
+                    <span class="stat-label">Предупреждения</span>
+                    <span class="stat-value warn">{warn_count}</span>
+                </div>
+                <div class="stat-card">
+                    <span class="stat-label">Ошибки / Браковано</span>
+                    <span class="stat-value fail">{fail_count}</span>
+                </div>
+            </div>
+
+            <!-- Control Bar (Select All + Filters) -->
+            <div class="controls-row">
+                <label class="select-all-label">
+                    <input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll(this)">
+                    <span>Выбрать все заказы на странице</span>
+                </label>
+
+                <div class="filter-pills">
+                    <button class="filter-btn active" onclick="applyFilter('all', this)">Все <span class="count-tag">{total_orders}</span></button>
+                    <button class="filter-btn" onclick="applyFilter('pass', this)">Пройденные <span class="count-tag">{pass_count}</span></button>
+                    <button class="filter-btn" onclick="applyFilter('warning', this)">Предупреждения <span class="count-tag">{warn_count}</span></button>
+                    <button class="filter-btn" onclick="applyFilter('fail', this)">Ошибки <span class="count-tag">{fail_count}</span></button>
+                </div>
+            </div>
+        </header>
+
+        <!-- Orders Cards Container -->
+        <main class="orders-list">
+            {order_cards_html}
+        </main>
+    </div>
+
+    <!-- Sticky Action Bar at Bottom -->
+    <div class="bottom-action-bar">
+        <div class="action-info">
+            <span>Выбрано заказов:</span>
+            <span class="selected-count-badge" id="selectedCounter">0</span>
+        </div>
+
+        <div class="action-buttons">
+            <button class="btn-action btn-reject" onclick="handleAction('reject')">
+                ↩️ Вернуть заказы на доработку
+            </button>
+            <button class="btn-action btn-print" onclick="handleAction('print')">
+                🖨️ Провести заказы на печать
+            </button>
+        </div>
+    </div>
+
+    <!-- Lightbox Modal -->
+    <div id="lightboxModal" class="lightbox-modal" onclick="closeModal(event)">
+        <div class="lightbox-box">
+            <span class="lightbox-close-btn" onclick="closeModal(event)">✕</span>
+            <img id="modalImg" class="lightbox-img" src="" alt="Full preview">
+            <div id="modalTitle" class="lightbox-title"></div>
+        </div>
+    </div>
+
+    <script>
+        // Modal Lightbox functions
+        function openModal(src, title) {{
+            const modal = document.getElementById('lightboxModal');
+            document.getElementById('modalImg').src = src;
+            document.getElementById('modalTitle').innerText = title;
+            modal.classList.add('active');
+        }}
+
+        function closeModal(e) {{
+            if (e.target.id === 'lightboxModal' || e.target.classList.contains('lightbox-close-btn')) {{
+                document.getElementById('lightboxModal').classList.remove('active');
+            }}
+        }}
+
+        document.addEventListener('keydown', (e) => {{
+            if (e.key === 'Escape') {{
+                document.getElementById('lightboxModal').classList.remove('active');
+            }}
+        }});
+
+        // Selection & Action functions
+        function toggleSelectAll(masterCheckbox) {{
+            const checkboxes = document.querySelectorAll('.order-checkbox');
+            checkboxes.forEach(cb => {{
+                const card = cb.closest('.order-card');
+                if (card.style.display !== 'none') {{
+                    cb.checked = masterCheckbox.checked;
+                    toggleCardHighlight(cb);
+                }}
+            }});
+            updateSelectedCount();
+        }}
+
+        function toggleCardHighlight(cb) {{
+            const card = cb.closest('.order-card');
+            if (cb.checked) {{
+                card.classList.add('selected');
+            }} else {{
+                card.classList.remove('selected');
+            }}
+        }}
+
+        function updateSelectedCount() {{
+            const checkboxes = document.querySelectorAll('.order-checkbox');
+            let count = 0;
+            checkboxes.forEach(cb => {{
+                toggleCardHighlight(cb);
+                if (cb.checked) count++;
+            }});
+            document.getElementById('selectedCounter').innerText = count;
+        }}
+
+        // Filtering
+        function applyFilter(status, btn) {{
+            const buttons = document.querySelectorAll('.filter-btn');
+            buttons.forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+
+            const cards = document.querySelectorAll('.order-card');
+            cards.forEach(card => {{
+                if (status === 'all' || card.dataset.status === status) {{
+                    card.style.display = 'block';
+                }} else {{
+                    card.style.display = 'none';
+                }}
+            }});
+
+            document.getElementById('selectAllCheckbox').checked = false;
+            updateSelectedCount();
+        }}
+
+        // Action handlers
+        function handleAction(type) {{
+            const selected = [];
+            document.querySelectorAll('.order-checkbox:checked').forEach(cb => {{
+                const num = cb.closest('.order-card').querySelector('.order-num').innerText;
+                selected.push(num);
+            }});
+
+            if (selected.length === 0) {{
+                alert('Пожалуйста, выберите хотя бы один заказ с помощью чекбокса.');
+                return;
+            }}
+
+            if (type === 'print') {{
+                alert(`✅ ${{selected.length}} зак.(а/ов) отправлено в печать!\\n\\nСписок:\\n` + selected.join('\\n'));
+            }} else if (type === 'reject') {{
+                alert(`↩️ ${{selected.length}} зак.(а/ов) возвращено на доработку менеджеру!\\n\\nСписок:\\n` + selected.join('\\n'));
+            }}
+        }}
+    </script>
+</body>
+</html>
+"""
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(html_template)
+
+    return str(out_path)

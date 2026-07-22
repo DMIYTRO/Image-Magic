@@ -23,9 +23,14 @@ class FileCheck:
     dpi: Optional[float] = None
     dpi_x: Optional[float] = None
     dpi_y: Optional[float] = None
+    width_px: Optional[int] = None
+    height_px: Optional[int] = None
     actual_format: Optional[str] = None
     colorspace: Optional[str] = None
     errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    needs_resample: bool = False
+    resample_target_mm: Optional[tuple[float, float]] = None
 
     @property
     def passed(self) -> bool:

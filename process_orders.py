@@ -9,6 +9,7 @@ from processing import BatchProcessor
 INPUT_DIR = Path("/Users/admin/Desktop/sempels")
 PDF_DIR_NAME = "PDF"
 TROUBLES_DIR_NAME = "Troubles"
+PREVIEWS_DIR_NAME = "Previews"
 
 
 def print_report(processor: BatchProcessor, orders) -> None:
@@ -42,6 +43,8 @@ def print_report(processor: BatchProcessor, orders) -> None:
                 f"цвет {item.colorspace or 'не определён'}"
             )
             print(f"         {item.path.name}")
+            for warning in item.warnings:
+                print(f"         Предупреждение: {warning}")
             for error in item.errors:
                 print(f"         Причина: {error}")
 
@@ -77,8 +80,36 @@ def print_report(processor: BatchProcessor, orders) -> None:
     )
 
 
+def generate_and_print_previews(
+    processor: BatchProcessor,
+    pdf_paths: list[Path],
+    preview_dir: Path,
+    pdf_page_names_map: Optional[dict[Path, list[str]]] = None,
+) -> None:
+    if not pdf_paths:
+        return
+    print(f"\n" + "=" * 78)
+    print(f"ГЕНЕРАЦИЯ ПРЕВЬЮ С РАМКАМИ ({len(pdf_paths)} PDF)")
+    print(f"Папка превью: {preview_dir}")
+    print("=" * 78)
+
+    results = processor.generate_previews_for_all(
+        pdf_paths, preview_dir, pdf_page_names_map=pdf_page_names_map
+    )
+    success_count = 0
+    for pdf_path, previews, error in results:
+        if error:
+            print(f"  [FAIL] {pdf_path.name}: {error}")
+        else:
+            success_count += 1
+            names = ", ".join(p.name for p in previews)
+            print(f"  [OK] {pdf_path.name} → {names}")
+
+    print(f"\nУспешно сгенерировано превью для {success_count}/{len(pdf_paths)} PDF файлов.")
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Проверка заказов и создание PDF после подтверждения")
+    parser = argparse.ArgumentParser(description="Проверка заказов, создание PDF и генерация превью с рамками")
     parser.add_argument("--input", type=Path, default=INPUT_DIR, help="Папка с исходными файлами")
     parser.add_argument(
         "--output",
@@ -86,10 +117,31 @@ def main() -> None:
         default=None,
         help="Папка для готовых PDF (по умолчанию: подпапка PDF во входной папке)",
     )
+    parser.add_argument(
+        "--previews-dir",
+        type=Path,
+        default=None,
+        help="Папка для сгенерированных превью (по умолчанию: подпапка Previews во входной папке)",
+    )
+    parser.add_argument(
+        "--previews-only",
+        action="store_true",
+        help="Сгенерировать превью для всех существующих PDF в папки PDF без проверки входных исходников",
+    )
     args = parser.parse_args()
 
     output_dir = args.output if args.output is not None else args.input / PDF_DIR_NAME
+    preview_dir = args.previews_dir if args.previews_dir is not None else args.input / PREVIEWS_DIR_NAME
     processor = BatchProcessor(args.input, output_dir)
+
+    if args.previews_only:
+        existing_pdfs = sorted(output_dir.glob("*.pdf")) if output_dir.is_dir() else []
+        if not existing_pdfs:
+            print(f"В папке {output_dir} не найдено PDF файлов.")
+            return
+        generate_and_print_previews(processor, existing_pdfs, preview_dir)
+        return
+
     try:
         orders = processor.inspect_orders()
     except Exception as exc:
@@ -108,28 +160,82 @@ def main() -> None:
         print(f"  Папка: {troubles_dir}")
 
     suitable = [order for order in orders if order.passed]
-    if not suitable:
-        print("\nНет заказов, подходящих для создания PDF.")
-        return
+    created_pdf_paths: list[Path] = []
+    created_pdf_map: dict[str, Path] = {}
 
-    answer = input(f"\nСоздать PDF для подходящих заказов ({len(suitable)})? [y/N]: ").strip().lower()
-    if answer not in {"y", "yes", "д", "да"}:
-        print("Создание PDF отменено. Исходные файлы не изменены.")
-        return
-
-    results = processor.create_pdfs(suitable)
-    print("\nРЕЗУЛЬТАТ СОЗДАНИЯ PDF")
-    for order, path, error in results:
-        if error:
-            print(f"  [FAIL] Заказ {order.order_id}: {error}")
-            routed = processor.copy_pdf_failure_to_troubles(order, troubles_dir, error)
-            copied = sum(copy_error is None for _, _, copy_error in routed)
-            print(f"         Скопировано в Troubles: {copied}/{len(routed)} файлов")
-            for source, _, copy_error in routed:
-                if copy_error:
-                    print(f"         Не удалось скопировать {source.name}: {copy_error}")
+    if suitable:
+        answer = input(f"\nСоздать PDF для подходящих заказов ({len(suitable)})? [y/N]: ").strip().lower()
+        if answer in {"y", "yes", "д", "да"}:
+            results = processor.create_pdfs(suitable)
+            print("\nРЕЗУЛЬТАТ СОЗДАНИЯ PDF")
+            for order, path, error in results:
+                if error:
+                    print(f"  [FAIL] Заказ {order.order_id}: {error}")
+                    routed = processor.copy_pdf_failure_to_troubles(order, troubles_dir, error)
+                    copied = sum(copy_error is None for _, _, copy_error in routed)
+                    print(f"         Скопировано в Troubles: {copied}/{len(routed)} файлов")
+                    for source, _, copy_error in routed:
+                        if copy_error:
+                            print(f"         Не удалось скопировать {source.name}: {copy_error}")
+                else:
+                    print(f"  [PASS] Заказ {order.order_id}: {path}")
+                    created_pdf_paths.append(path)
+                    created_pdf_map[order.order_id] = path
         else:
-            print(f"  [PASS] Заказ {order.order_id}: {path}")
+            print("Создание PDF отменено. Исходные файлы не изменены.")
+
+    # Построение карты имен оригинальных макетов для превью (face / back)
+    pdf_page_names_map: dict[Path, list[str]] = {}
+    for order in orders:
+        ordered_files = sorted(order.files, key=lambda item: 0 if item.parsed.side == "face" else 1)
+        face_file = next((item for item in ordered_files if item.parsed.side == "face"), None)
+        if face_file:
+            pdf_p = output_dir / f"{face_file.path.stem}.pdf"
+            pdf_page_names_map[pdf_p] = [item.path.stem for item in ordered_files]
+
+    existing_pdfs = sorted(output_dir.glob("*.pdf")) if output_dir.is_dir() else []
+    target_pdfs = created_pdf_paths if created_pdf_paths else existing_pdfs
+
+    previews_generated_count = 0
+    if target_pdfs:
+        answer_preview = input(
+            f"\nСгенерировать превью с рамками (зелёная 1 мм обрез / красная 4 мм безопасная зона) для {len(target_pdfs)} PDF? [Y/n]: "
+        ).strip().lower()
+        if answer_preview in {"", "y", "yes", "д", "да"}:
+            generate_and_print_previews(
+                processor, target_pdfs, preview_dir, pdf_page_names_map=pdf_page_names_map
+            )
+            previews_generated_count = len(target_pdfs)
+
+    # Запись аудита всех заказов в базу данных SQLAlchemy
+    try:
+        from core.history_db import save_order_audit
+        saved_count = 0
+        for order in orders:
+            pdf_p = created_pdf_map.get(order.order_id)
+            save_order_audit(
+                order=order,
+                pdf_path=pdf_p,
+                previews_count=previews_generated_count if pdf_p else 0,
+                db_path=Path.cwd() / "audit_history.db",
+            )
+            saved_count += 1
+        print(f"\n[DB] История проверки {saved_count} заказов успешно сохранена в базу данных SQLite (audit_history.db).")
+    except Exception as db_exc:
+        print(f"\n[DB] Не удалось сохранить историю аудита в БД: {db_exc}")
+
+    # Генерация интерактивного HTML отчёта
+    try:
+        from core.report_builder import build_orders_html_report
+        report_html_path = args.input / "output_report" / "report.html"
+        generated_html = build_orders_html_report(
+            orders=orders,
+            output_html_path=report_html_path,
+            preview_dir=preview_dir,
+        )
+        print(f"[HTML] Интерактивный HTML-отчёт успешно создан: {generated_html}")
+    except Exception as html_exc:
+        print(f"[HTML] Не удалось сгенерировать HTML-отчёт: {html_exc}")
 
 
 if __name__ == "__main__":

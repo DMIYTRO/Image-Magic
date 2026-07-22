@@ -5,3 +5,4 @@ output_report/previews/
 *.tiff
 __pycache__/
 .DS_Store
+audit_history.db
