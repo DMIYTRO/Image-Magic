@@ -20,6 +20,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
 from processing.models import FileCheck, OrderCheck
+from config.profiles import DEFAULT_PROFILE, PrePressProfile
 
 
 class Base(DeclarativeBase):
@@ -115,6 +116,7 @@ def save_order_audit(
     pdf_path: Optional[str | Path] = None,
     previews_count: int = 0,
     db_path: Optional[Path] = None,
+    profile: PrePressProfile = DEFAULT_PROFILE,
 ) -> OrderAudit:
     """Сохраняет полную проверку заказа и его файлов в базу данных SQLAlchemy."""
     engine = get_db_engine(db_path)
@@ -145,8 +147,8 @@ def save_order_audit(
                 else None
             )
 
-            exp_w = file_check.parsed.width_mm + 4.0 if file_check.parsed else None
-            exp_h = file_check.parsed.height_mm + 4.0 if file_check.parsed else None
+            exp_w = file_check.parsed.width_mm + profile.size_extra_mm if file_check.parsed else None
+            exp_h = file_check.parsed.height_mm + profile.size_extra_mm if file_check.parsed else None
             c_mode = f"{file_check.parsed.front_colors}-{file_check.parsed.back_colors}" if file_check.parsed else None
 
             file_audit = FileAudit(

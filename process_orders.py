@@ -3,6 +3,7 @@ import argparse
 from pathlib import Path
 
 from processing import BatchProcessor
+from config.profiles import DEFAULT_DIRECTION, PROFILES, get_profile
 
 
 # Быстро изменяемые пути для тестового запуска.
@@ -128,11 +129,18 @@ def main() -> None:
         action="store_true",
         help="Сгенерировать превью для всех существующих PDF в папки PDF без проверки входных исходников",
     )
+    parser.add_argument(
+        "--direction",
+        choices=tuple(PROFILES),
+        default=DEFAULT_DIRECTION,
+        help=f"Профиль направления (по умолчанию: {DEFAULT_DIRECTION})",
+    )
     args = parser.parse_args()
 
     output_dir = args.output if args.output is not None else args.input / PDF_DIR_NAME
     preview_dir = args.previews_dir if args.previews_dir is not None else args.input / PREVIEWS_DIR_NAME
-    processor = BatchProcessor(args.input, output_dir)
+    processor = BatchProcessor(args.input, output_dir, profile=get_profile(args.direction))
+    print(f"Профиль направления: {processor.profile.name} ({processor.profile.direction})")
 
     if args.previews_only:
         existing_pdfs = sorted(output_dir.glob("*.pdf")) if output_dir.is_dir() else []
@@ -233,6 +241,7 @@ def main() -> None:
                 pdf_path=pdf_p,
                 previews_count=previews_generated_count if pdf_p else 0,
                 db_path=Path.cwd() / "audit_history.db",
+                profile=processor.profile,
             )
             saved_count += 1
         print(f"\n[DB] История проверки {saved_count} заказов успешно сохранена в базу данных SQLite (audit_history.db).")
@@ -247,6 +256,7 @@ def main() -> None:
             orders=orders,
             output_html_path=report_html_path,
             preview_dir=preview_dir,
+            profile=processor.profile,
         )
         print(f"[HTML] Интерактивный HTML-отчёт успешно создан: {generated_html}")
     except Exception as html_exc:

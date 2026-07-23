@@ -8,7 +8,8 @@ import os
 import sys
 import glob
 import argparse
-from config.profiles import DEFAULT_PROFILE, PrePressProfile
+from dataclasses import replace
+from config.profiles import DEFAULT_DIRECTION, PROFILES, get_profile
 from core.inspector import inspect_file
 from core.preview_generator import generate_preview
 from core.report_builder import build_reports
@@ -21,7 +22,13 @@ def main():
     parser = argparse.ArgumentParser(description="Image-Magic: Допечатная проверка макетов и генератор отчётов")
     parser.add_argument("--input", "-i", type=str, default="input_files", help="Путь к папке с макетами")
     parser.add_argument("--output", "-o", type=str, default="output_report", help="Путь к папке отчётов")
-    parser.add_argument("--dpi", type=float, default=300.0, help="Требуемый DPI (по умолчанию 300)")
+    parser.add_argument("--dpi", type=float, default=None, help="Переопределить целевой DPI выбранного профиля")
+    parser.add_argument(
+        "--direction",
+        choices=tuple(PROFILES),
+        default=DEFAULT_DIRECTION,
+        help=f"Профиль направления (по умолчанию: {DEFAULT_DIRECTION})",
+    )
     parser.add_argument("--autofix", action="store_true", default=True, help="Автоматически даунсемплить файлы с низким DPI и большим размером")
 
     args = parser.parse_args()
@@ -49,7 +56,10 @@ def main():
 
     files.sort()
 
-    profile = PrePressProfile(target_dpi=args.dpi)
+    profile = get_profile(args.direction)
+    if args.dpi is not None:
+        profile = replace(profile, target_dpi=args.dpi, min_dpi=args.dpi)
+    print(f"📋 Профиль: {profile.name} ({profile.direction})")
     results = []
     preview_file_paths = []
 

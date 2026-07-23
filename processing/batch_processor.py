@@ -8,6 +8,7 @@ from core.inspector import count_frames, inspect_file
 from core.pdf_exporter import convert_image_to_pdf, merge_pdfs_with_ghostscript
 from core.preview_generator import generate_preview
 from core.resampler import resample_image
+from config.profiles import DEFAULT_PROFILE, PrePressProfile
 from .resample_policy import ResampleDecision, analyze_resample
 
 from .filename_parser import parse_filename
@@ -16,7 +17,6 @@ from .models import FileCheck, OrderCheck
 
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 REJECTED_EXTENSIONS = {".psd", ".bmp", ".heic", ".heif"}
-ALLOWED_COLOR_MODES = {(4, 4), (4, 0), (1, 0), (1, 1), (5, 5), (6, 0), (6, 6), (5, 0)}
 
 
 class BatchProcessor:
@@ -24,15 +24,19 @@ class BatchProcessor:
         self,
         input_dir: Path,
         output_dir: Path,
-        size_extra_mm: float = 4.0,
-        tolerance_mm: float = 0.5,
-        min_dpi: float = 300.0,
+        size_extra_mm: float | None = None,
+        tolerance_mm: float | None = None,
+        min_dpi: float | None = None,
+        *,
+        profile: PrePressProfile = DEFAULT_PROFILE,
     ):
         self.input_dir = input_dir
         self.output_dir = output_dir
-        self.size_extra_mm = size_extra_mm
-        self.tolerance_mm = tolerance_mm
-        self.min_dpi = min_dpi
+        self.profile = profile
+        # Необязательные аргументы оставлены для совместимости и точечных тестов.
+        self.size_extra_mm = profile.size_extra_mm if size_extra_mm is None else size_extra_mm
+        self.tolerance_mm = profile.size_tolerance_mm if tolerance_mm is None else tolerance_mm
+        self.min_dpi = profile.min_dpi if min_dpi is None else min_dpi
         self.unparsed: list[FileCheck] = []
         self.unsupported: list[FileCheck] = []
 
@@ -112,6 +116,9 @@ class BatchProcessor:
                 target,
                 (check.dpi_x or 0.0, check.dpi_y or 0.0),
                 min_dpi=self.min_dpi,
+                metadata_tolerance_mm=self.profile.metadata_tolerance_mm,
+                auto_crop_mm=self.profile.auto_crop_mm,
+                confirm_crop_mm=self.profile.confirm_crop_mm,
                 allow_rotation=False,
             )
             for target in (expected, (expected[1], expected[0]))
@@ -158,9 +165,11 @@ class BatchProcessor:
                 "проверьте ориентацию и совмещение лица и оборота"
             )
 
-        if (check.colorspace or "").upper() not in {"CMYK", "COLORSEPARATION"}:
+        allowed_colorspaces = {value.upper() for value in self.profile.allowed_colorspaces}
+        if (check.colorspace or "").upper() not in allowed_colorspaces:
             check.warnings.append(
-                f"цветовая модель {check.colorspace or 'не определена'} отличается от CMYK; "
+                f"цветовая модель {check.colorspace or 'не определена'} не входит в профиль "
+                f"{self.profile.name} ({', '.join(self.profile.allowed_colorspaces)}); "
                 "файл будет сохранён без преобразования цветовой модели"
             )
 
@@ -177,8 +186,10 @@ class BatchProcessor:
             check.errors.append(f"разрешение {actual_dpi} DPI; по обеим осям требуется не меньше {self.min_dpi:.0f} DPI")
 
         color_mode = (parsed.front_colors, parsed.back_colors)
-        if color_mode not in ALLOWED_COLOR_MODES:
-            allowed = ", ".join(f"{front}-{back}" for front, back in sorted(ALLOWED_COLOR_MODES))
+        if color_mode not in self.profile.allowed_color_modes:
+            allowed = ", ".join(
+                f"{front}-{back}" for front, back in sorted(self.profile.allowed_color_modes)
+            )
             check.errors.append(
                 f"цветность {color_mode[0]}-{color_mode[1]} не поддерживается; разрешены: {allowed}"
             )
@@ -441,11 +452,14 @@ class BatchProcessor:
         pdf_path: Path,
         preview_dir: Path,
         render_dpi: float = 150.0,
-        safe_zone_mm: float = 4.0,
-        bleed_mm: float = 1.0,
+        safe_zone_mm: float | None = None,
+        bleed_mm: float | None = None,
         page_names: Optional[list[str]] = None,
     ) -> list[Path]:
         """Рендерит страницы PDF и генерирует превью с рамками (1 мм зелёная наружная, 4 мм красная внутренняя)."""
+        safe_zone_mm = self.profile.safe_zone_mm if safe_zone_mm is None else safe_zone_mm
+        # Линия реза на превью исторически имеет толщину 1 мм; это не вылет.
+        bleed_mm = 1.0 if bleed_mm is None else bleed_mm
         gs_cmd = shutil.which("gs")
         if not gs_cmd:
             raise FileNotFoundError("Ghostscript (`gs`) не найден для рендеринга превью.")
