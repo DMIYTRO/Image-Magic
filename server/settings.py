@@ -1,0 +1,125 @@
+"""Server settings."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import os
+from pathlib import Path
+
+
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+# Временный пароль для локального тестового сервера. Удалить после тестового этапа.
+TEST_SERVER_PASSWORD_HASH = (
+    "$argon2id$v=19$m=65536,t=3,p=4$N2Kma52ne4WjmBNi7AYvBw$"
+    "VdDv4X2PUCX+vQGlJvbbjP5MdwqOR5Kqx3tjxYBG37s"
+)
+
+
+def _default_sborka_api_dir() -> Path:
+    """Prefer the shared Sborka API checkout when it provides rework support."""
+    shared_dir = PROJECT_DIR.parent / "sborka_api"
+    if (shared_dir / "sborka_touser.py").is_file():
+        return shared_dir
+    return PROJECT_DIR / "sborka_api"
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+@dataclass(frozen=True, slots=True)
+class Settings:
+    database_url: str
+    password_hash: str | None
+    session_hours: int = 12
+    cookie_name: str = "image_magic_session"
+    cookie_secure: bool | None = None
+    login_attempts: int = 5
+    login_window_seconds: int = 300
+    login_failure_delay_seconds: float = 0.5
+    log_dir: Path = PROJECT_DIR / "logs"
+    log_level: str = "INFO"
+    log_max_bytes: int = 10 * 1024 * 1024
+    log_backup_count: int = 10
+    log_heartbeat_seconds: int = 60
+    sborka_api_dir: Path = _default_sborka_api_dir()
+    sborka_timeout_seconds: int = 20
+    sborka_enabled: bool = False
+
+    @classmethod
+    def from_env(cls) -> "Settings":
+        default_db = PROJECT_DIR / "image_magic.db"
+        secure_value = os.environ.get("IMAGE_MAGIC_COOKIE_SECURE")
+        password_hash = (
+            os.environ.get("IMAGE_MAGIC_PASSWORD_HASH", "").strip()
+            or TEST_SERVER_PASSWORD_HASH
+        )
+        return cls(
+            database_url=os.environ.get(
+                "IMAGE_MAGIC_DATABASE_URL", f"sqlite:///{default_db}"
+            ),
+            password_hash=password_hash,
+            session_hours=max(
+                1, int(os.environ.get("IMAGE_MAGIC_SESSION_HOURS", "12"))
+            ),
+            cookie_name=os.environ.get(
+                "IMAGE_MAGIC_SESSION_COOKIE", "image_magic_session"
+            ),
+            cookie_secure=(
+                _env_bool("IMAGE_MAGIC_COOKIE_SECURE", False)
+                if secure_value is not None
+                else None
+            ),
+            login_attempts=max(
+                1, int(os.environ.get("IMAGE_MAGIC_LOGIN_ATTEMPTS", "5"))
+            ),
+            login_window_seconds=max(
+                1, int(os.environ.get("IMAGE_MAGIC_LOGIN_WINDOW_SECONDS", "300"))
+            ),
+            login_failure_delay_seconds=max(
+                0.0,
+                float(
+                    os.environ.get(
+                        "IMAGE_MAGIC_LOGIN_FAILURE_DELAY_SECONDS", "0.5"
+                    )
+                ),
+            ),
+            log_dir=Path(
+                os.environ.get("IMAGE_MAGIC_LOG_DIR", PROJECT_DIR / "logs")
+            ).expanduser(),
+            log_level=os.environ.get("IMAGE_MAGIC_LOG_LEVEL", "INFO"),
+            log_max_bytes=max(
+                1024,
+                int(
+                    os.environ.get(
+                        "IMAGE_MAGIC_LOG_MAX_BYTES", str(10 * 1024 * 1024)
+                    )
+                ),
+            ),
+            log_backup_count=max(
+                1, int(os.environ.get("IMAGE_MAGIC_LOG_BACKUP_COUNT", "10"))
+            ),
+            log_heartbeat_seconds=max(
+                10, int(os.environ.get("IMAGE_MAGIC_LOG_HEARTBEAT_SECONDS", "60"))
+            ),
+            sborka_api_dir=Path(
+                os.environ.get("IMAGE_MAGIC_SBORKA_API_DIR", _default_sborka_api_dir())
+            ).expanduser().resolve(),
+            sborka_timeout_seconds=max(
+                1, int(os.environ.get("IMAGE_MAGIC_SBORKA_TIMEOUT_SECONDS", "20"))
+            ),
+            sborka_enabled=_env_bool(
+                "IMAGE_MAGIC_SBORKA_ENABLED",
+                (
+                    Path(
+                        os.environ.get(
+                            "IMAGE_MAGIC_SBORKA_API_DIR", _default_sborka_api_dir()
+                        )
+                    ).expanduser()
+                    / "sborka_api_key.txt"
+                ).is_file(),
+            ),
+        )

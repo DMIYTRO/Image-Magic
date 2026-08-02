@@ -33,13 +33,15 @@ Image Magic/
 - Python 3.10 или новее;
 - ImageMagick с доступной командой `magick`;
 - Ghostscript с доступной командой `gs`;
-- Python-библиотеки из `requirements.txt` (`SQLAlchemy` и `typing_extensions`).
+- Python-библиотеки из `requirements.txt` (`FastAPI`, `SQLAlchemy`, `Alembic`,
+  `argon2-cffi`, `PyMuPDF` и остальные зависимости).
+- Node.js 20+ для сборки Vue-интерфейса.
 
 ### Для чего нужны зависимости
 
 - Python запускает обработчик и выполняет группировку заказов.
 - ImageMagick читает TIFF/JPEG/PNG, DPI, физический размер и CMYK, определяет количество страниц TIFF и создаёт временные одностраничные PDF.
-- Ghostscript объединяет временные PDF в итоговый документ и проверяет его открытие, количество и размеры страниц.
+- PyMuPDF объединяет временные PDF в итоговый документ прямым копированием страниц; Ghostscript проверяет его открытие, количество и размеры страниц.
 - SQLAlchemy сохраняет историю проверок в базе SQLite.
 
 ## 3. Установка на macOS
@@ -56,7 +58,12 @@ https://brew.sh
 
 ```bash
 brew install python imagemagick ghostscript
-python3 -m pip install -r requirements.txt
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+cd frontend
+npm install
+npm run build
+cd ..
 ```
 
 Проверка:
@@ -66,6 +73,27 @@ python3 --version
 magick -version
 gs --version
 ```
+
+### Подготовка веб-сервиса
+
+Для текущего тестового сервера задан постоянный пароль: `111`.
+После тестового этапа задайте `IMAGE_MAGIC_PASSWORD_HASH` и удалите этот fallback.
+
+```bash
+.venv/bin/alembic upgrade head
+.venv/bin/python control_panel.py
+```
+
+Откройте `http://127.0.0.1:8006/login`. По умолчанию сессия действует 12 часов.
+
+Журнал работы сервера находится в `logs/image-magic.log`, а низкоуровневые
+аварии Python — в `logs/image-magic-fault.log`. Для наблюдения в реальном
+времени используйте:
+
+```bash
+tail -f logs/image-magic.log
+```
+Доступные рабочие каталоги ограничиваются `IMAGE_MAGIC_ALLOWED_ROOTS`.
 
 ## 4. Установка на Ubuntu/Debian
 
@@ -219,10 +247,10 @@ back.tif/jpg/png
   -> ImageMagick -> временный одностраничный back.pdf
 
 face.pdf + back.pdf
-  -> Ghostscript -> итоговый PDF
+  -> PyMuPDF (insert_pdf) -> итоговый PDF
 ```
 
-Ghostscript запускается с отключённым уменьшением разрешения, `LeaveColorUnchanged`, выключенным автоповоротом страниц и без повторного JPEG-кодирования. Временные файлы удаляются автоматически.
+PyMuPDF копирует страницы без растеризации и преобразования цветов. Ghostscript остаётся независимым контрольным рендерером; временные файлы удаляются автоматически.
 
 Имя итогового PDF берётся от исходного файла `face`, меняется только расширение на `.pdf`.
 

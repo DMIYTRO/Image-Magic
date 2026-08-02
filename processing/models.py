@@ -27,6 +27,7 @@ class FileCheck:
     height_px: Optional[int] = None
     actual_format: Optional[str] = None
     colorspace: Optional[str] = None
+    size_mb: float = 0.0
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     needs_resample: bool = False
@@ -39,6 +40,13 @@ class FileCheck:
     resample_confirmed: Optional[bool] = None
     rotation_degrees: int = 0
     orientation_verified: bool = False
+    # PDF-specific facts.  These are optional so existing image workflows and
+    # callers constructing FileCheck directly remain compatible.
+    page_count: Optional[int] = None
+    pdf_pages: tuple[object, ...] = ()
+    pdf_colorspaces: tuple[str, ...] = ()
+    pdf_min_dpi: Optional[float] = None
+    pdf_content_type: Optional[str] = None
 
     @property
     def passed(self) -> bool:
@@ -52,6 +60,10 @@ class OrderCheck:
     files: list[FileCheck] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+
+    @property
+    def aggregate_id(self) -> str:
+        return f"{self.customer_id}:{self.order_id}"
 
     @property
     def passed(self) -> bool:
